@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Wellbeing Advisor</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; text-align: center; background: #1a1a24; color: #fff; padding: 20px; }
+        a { color: #00ff66; }
+        .dashboard { display: flex; justify-content: center; gap: 30px; margin-top: 20px; flex-wrap: wrap; align-items: flex-start; }
+        .card { background: #252538; padding: 20px; border-radius: 12px; width: 100%; max-width: 440px; box-sizing: border-box; text-align: left; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+        .card h3 { margin-top: 0; border-bottom: 2px solid #444; padding-bottom: 10px; color: #00ff66; }
+        .stat-line { margin: 8px 0; font-size: 1.05rem; }
+        button { background: #1fa855; color: white; border: none; padding: 12px 22px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 1rem; margin-top: 15px; }
+        button:hover:not(:disabled) { background: #178a45; }
+        button:disabled { opacity: 0.35; cursor: not-allowed; }
+        .hint { color: #aaa; font-size: 0.9rem; margin-top: 10px; }
+        .badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: bold; background: #555; margin-bottom: 10px; }
+        .badge.llm { background: #1fa855; }
+        .suggestion { background: #1f1f2e; border-left: 4px solid #00ff66; padding: 10px 14px; border-radius: 6px; margin: 12px 0; }
+        .suggestion strong { display: block; margin-bottom: 4px; }
+        .notice { background: #4a3b12; border: 1px solid #c9a227; padding: 10px 14px; border-radius: 6px; margin: 12px 0; }
+        .disclaimer { font-size: 0.85rem; color: #aaa; margin-top: 16px; }
+        .meta { font-size: 0.85rem; color: #aaa; }
+        .error { color: #ff6b78; }
+    </style>
+</head>
+<body>
+
+    <h1>Wellbeing Advisor</h1>
+    <p><a href="/">&larr; Back to the Face AI</a></p>
+
+    <div class="dashboard">
+        <div class="card">
+            <h3>Data from the Face AI</h3>
+            <div id="data-box">Loading...</div>
+            <button id="advice-btn" onclick="getAdvice()" disabled>Get advice</button>
+            <div class="hint" id="hint"></div>
+        </div>
+
+        <div class="card">
+            <h3>Advice</h3>
+            <div id="advice-box">Press "Get advice" to generate suggestions from the data on the left.</div>
+        </div>
+    </div>
+
+    <script>
+        const MIN_SAMPLES = 20;
+        const dataBox = document.getElementById('data-box');
+        const adviceBox = document.getElementById('advice-box');
+        const adviceBtn = document.getElementById('advice-btn');
+        const hint = document.getElementById('hint');
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+        let latest = null;
+        let generating = false;
+        let elapsed = 0;
+
+        function el(tag, cls, text) {
+            const e = document.createElement(tag);
+            if (cls) e.className = cls;
+            if (text !== undefined) e.textContent = text;
+            return e;
+        }
+
+        function fmtDuration(sec) {
+            const m = Math.floor(sec / 60), s = sec % 60;
+            return `${m}:${String(s).padStart(2, '0')}`;
+        }
+
+        function dominantOf(d) {
+            if (d.dominant_emotion) return d.dominant_emotion;
+            return Object.entries(d.summary).sort((a, b) => b[1] - a[1])[0][0];
+        }
+
+        function renderData(d) {
+            dataBox.replaceChildren();
+            if (!d || d.total_records === 0) {
+                dataBox.textContent = "No data yet. Start a session on the Face AI page first.";
+                return;
+            }
+            const line = (label, value) => {
+                const div = el('div', 'stat-line');
+                div.appendChild(el('strong', null, label + ' '));
+                div.appendChild(document.createTextNode(value));
+                dataBox.appendChild(div);
+            };
+            const dom = dominantOf(d);
+            line('Session:', d.active ? 'running' : 'stopped');
+            line('Length:', fmtDuration(d.duration_seconds));
+            line('Samples:', String(d.total_records));
+            line('Dominant emotion:', `${dom.toUpperCase()} (${d.summary[dom]}%)`);
+            dataBox.appendChild(document.createElement('br'));
+            for (const [emotion, pct] of Object.entries(d.summary).sort((a, b) => b[1] - a[1])) {
+                line(emotion.toUpperCase() + ':', pct + '%');
+            }
+        }
+
+        function updateButton() {
+            const n = latest ? latest.total_records : 0;
+            const enough = n >= MIN_SAMPLES;
+            adviceBtn.disabled = generating || !enough;
+            if (generating) {
+                hint.textContent = `Generating... ${elapsed}s (this can take up to a minute)`;
+            } else if (!enough) {
+                hint.textContent = `Needs at least ${MIN_SAMPLES} samples, there are ${n} so far. Keep a session running on the Face AI page.`;
+            } else {
+                hint.textContent = "";
+            }
+        }
+
+        async function loadData() {
+            try {
+                const res = await fetch('/emotion-summary');
+                const d = await res.json();
+                if (d.status !== 'success') return;
+                latest = d;
+                renderData(d);
+            } catch (e) {
+                dataBox.textContent = "Cannot reach the server.";
+            }
+            updateButton();
+        }
+
+        function renderAdvice(data, snap) {
+            adviceBox.replaceChildren();
+
+            const badge = el('span', data.source === 'llm' ? 'badge llm' : 'badge',
+                data.source === 'llm' ? `Written by the local AI model (${data.model})`
+                                      : 'Built-in guidance (the AI model was not available)');
+            adviceBox.appendChild(badge);
+            adviceBox.appendChild(el('div', 'meta',
+                `Based on ${snap.total_records} samples over ${fmtDuration(snap.duration_seconds)}.`));
+
+            if (data.summary) adviceBox.appendChild(el('p', null, data.summary));
+
+            for (const s of data.suggestions || []) {
+                const box = el('div', 'suggestion');
+                box.appendChild(el('strong', null, s.title));
+                box.appendChild(document.createTextNode(s.advice));
+                adviceBox.appendChild(box);
+            }
+
+            if (data.see_doctor) {
+                adviceBox.appendChild(el('div', 'notice', "Please consider talking to a professional about this."));
+            }
+            adviceBox.appendChild(el('div', 'disclaimer', data.disclaimer || ''));
+            if (data.duration_seconds !== undefined) {
+                adviceBox.appendChild(el('div', 'meta', `Generated in ${data.duration_seconds}s.`));
+            }
+        }
+
+        function renderError(msg) {
+            adviceBox.replaceChildren(el('div', 'error', msg));
+        }
+
+        async function getAdvice() {
+            if (generating || !latest || latest.total_records < MIN_SAMPLES) return;
+            const snap = latest;
+            generating = true;
+            elapsed = 0;
+            adviceBox.replaceChildren(el('div', null, "Generating advice..."));
+            const timer = setInterval(() => { elapsed++; updateButton(); }, 1000);
+            updateButton();
+
+            try {
+                const res = await fetch('/api/advice', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ emotion_summary: snap.summary })
+                });
+                let data;
+                try { data = await res.json(); }
+                catch (e) {
+                    throw new Error(res.status === 504 || res.status === 524
+                        ? "The server took too long to answer. Try again in a moment."
+                        : `The server returned an unexpected answer (HTTP ${res.status}).`);
+                }
+
+                if (res.ok && data.status === 'success') renderAdvice(data, snap);
+                else renderError(data.message || "The server could not generate advice.");
+            } catch (e) {
+                renderError(e instanceof TypeError
+                    ? "Cannot reach the server. Try again in a moment."
+                    : e.message);
+            } finally {
+                clearInterval(timer);
+                generating = false;
+                updateButton();
+            }
+        }
+
+        (async function loop() {
+            while (true) {
+                await loadData();
+                await sleep(5000);
+            }
+        })();
+    </script>
+</body>
+</html>
